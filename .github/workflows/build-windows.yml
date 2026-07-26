@@ -19,7 +19,7 @@ on:
       - "BUILD_TRIGGER"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -43,10 +43,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path package | Out-Null
           Copy-Item target/release/rust-ytdlp-gui.exe package/Rust-yt-dlp-GUI.exe
           Copy-Item README.md package/README.txt
+          Compress-Archive -Path package/* -DestinationPath Rust-yt-dlp-GUI-Windows.zip -Force
 
-      - name: Upload Windows build
-        uses: actions/upload-artifact@v4
+      - name: Publish downloadable build
+        uses: softprops/action-gh-release@v2
         with:
-          name: Rust-yt-dlp-GUI-Windows
-          path: package/*
-          if-no-files-found: error
+          tag_name: windows-build-${{ github.run_number }}
+          name: Windows Build ${{ github.run_number }}
+          body: Automated Windows build of Rust yt-dlp GUI.
+          prerelease: true
+          files: Rust-yt-dlp-GUI-Windows.zip
