@@ -9,6 +9,14 @@ on:
       - "Cargo.lock"
       - "src/**"
       - ".github/workflows/build-windows.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - ".github/workflows/build-windows.yml"
+      - "BUILD_TRIGGER"
 
 permissions:
   contents: write
@@ -34,39 +42,32 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
-
           New-Item -ItemType Directory -Force -Path package | Out-Null
           Copy-Item target/release/rust-ytdlp-gui.exe package/Rust-yt-dlp-GUI.exe
           Copy-Item README.md package/README.txt
-
-          Invoke-WebRequest `
-            -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' `
-            -OutFile 'package/yt-dlp.exe'
-
-          Invoke-WebRequest `
-            -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' `
-            -OutFile 'ffmpeg.zip'
-
+          Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile 'package/yt-dlp.exe'
+          Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile 'ffmpeg.zip'
           Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg-unpacked -Force
           $ffmpegRoot = Get-ChildItem ffmpeg-unpacked -Directory | Select-Object -First 1
           Copy-Item "$($ffmpegRoot.FullName)/bin/ffmpeg.exe" package/ffmpeg.exe
           Copy-Item "$($ffmpegRoot.FullName)/bin/ffprobe.exe" package/ffprobe.exe
-
           @'
-          This package contains:
-          - Rust-yt-dlp-GUI.exe
-          - yt-dlp.exe
-          - ffmpeg.exe
-          - ffprobe.exe
-
-          Keep all files in the same folder.
+          Keep Rust-yt-dlp-GUI.exe, yt-dlp.exe, ffmpeg.exe and ffprobe.exe in the same folder.
           yt-dlp: The Unlicense
           FFmpeg: GPL build distributed by gyan.dev
           '@ | Set-Content package/THIRD_PARTY_NOTICES.txt -Encoding utf8
-
           Compress-Archive -Path package/* -DestinationPath Rust-yt-dlp-GUI-Windows.zip -Force
 
+      - name: Upload chat-downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rust-yt-dlp-GUI-Windows
+          path: Rust-yt-dlp-GUI-Windows.zip
+          compression-level: 0
+          retention-days: 1
+
       - name: Publish downloadable build
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: windows-build-${{ github.run_number }}
