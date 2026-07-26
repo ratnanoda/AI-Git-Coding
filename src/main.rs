@@ -11,14 +11,52 @@ use std::{
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DownloadMode {
-    Video,
-    Audio,
+    VideoMp4,
+    AudioMp3,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VideoQuality {
+    Best,
+    Q2160,
+    Q1440,
+    Q1080,
+    Q720,
+    Q480,
+    Q360,
+}
+
+impl VideoQuality {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Best => "最高画質（自動）",
+            Self::Q2160 => "2160p (4K)",
+            Self::Q1440 => "1440p",
+            Self::Q1080 => "1080p",
+            Self::Q720 => "720p",
+            Self::Q480 => "480p",
+            Self::Q360 => "360p",
+        }
+    }
+
+    fn format(self) -> String {
+        match self {
+            Self::Best => "bv*+ba/b".to_owned(),
+            Self::Q2160 => "bv*[height<=2160]+ba/b[height<=2160]".to_owned(),
+            Self::Q1440 => "bv*[height<=1440]+ba/b[height<=1440]".to_owned(),
+            Self::Q1080 => "bv*[height<=1080]+ba/b[height<=1080]".to_owned(),
+            Self::Q720 => "bv*[height<=720]+ba/b[height<=720]".to_owned(),
+            Self::Q480 => "bv*[height<=480]+ba/b[height<=480]".to_owned(),
+            Self::Q360 => "bv*[height<=360]+ba/b[height<=360]".to_owned(),
+        }
+    }
 }
 
 struct App {
     url: String,
     output_dir: String,
     mode: DownloadMode,
+    quality: VideoQuality,
     status: String,
     log: String,
     running: bool,
@@ -40,7 +78,8 @@ impl Default for App {
         Self {
             url: String::new(),
             output_dir,
-            mode: DownloadMode::Video,
+            mode: DownloadMode::VideoMp4,
+            quality: VideoQuality::Best,
             status: "準備完了".to_owned(),
             log: String::new(),
             running: false,
@@ -51,40 +90,49 @@ impl Default for App {
 }
 
 impl App {
-    fn yt_dlp_path() -> PathBuf {
+    fn app_dir() -> PathBuf {
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("yt-dlp.exe")
     }
 
-    fn ensure_yt_dlp(&mut self) -> Result<PathBuf, String> {
-        let path = Self::yt_dlp_path();
-        if path.exists() {
-            return Ok(path);
+    fn yt_dlp_path() -> PathBuf {
+        Self::app_dir().join("yt-dlp.exe")
+    }
+
+    fn ffmpeg_path() -> PathBuf {
+        Self::app_dir().join("ffmpeg.exe")
+    }
+
+    fn ffprobe_path() -> PathBuf {
+        Self::app_dir().join("ffprobe.exe")
+    }
+
+    fn check_bundled_tools(&self) -> Result<PathBuf, String> {
+        let yt_dlp = Self::yt_dlp_path();
+        let ffmpeg = Self::ffmpeg_path();
+        let ffprobe = Self::ffprobe_path();
+
+        let mut missing = Vec::new();
+        if !yt_dlp.exists() {
+            missing.push("yt-dlp.exe");
+        }
+        if !ffmpeg.exists() {
+            missing.push("ffmpeg.exe");
+        }
+        if !ffprobe.exists() {
+            missing.push("ffprobe.exe");
         }
 
-        self.status = "yt-dlpを取得中...".to_owned();
-        let url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-        let escaped = path.to_string_lossy().replace('"', "\"");
-        let script = format!(
-            "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -Uri '{}' -OutFile \"{}\"",
-            url, escaped
-        );
-
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
-            .output()
-            .map_err(|e| format!("PowerShellを起動できません: {e}"))?;
-
-        if !output.status.success() || !path.exists() {
-            return Err(format!(
-                "yt-dlpの取得に失敗しました。\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
+        if missing.is_empty() {
+            Ok(yt_dlp)
+        } else {
+            Err(format!(
+                "必要な同梱ファイルが見つかりません: {}\nZIPを展開したフォルダ内のファイルを移動・削除せずに起動してください。",
+                missing.join(", ")
+            ))
         }
-        Ok(path)
     }
 
     fn start_download(&mut self) {
@@ -100,10 +148,10 @@ impl App {
             return;
         }
 
-        let yt_dlp = match self.ensure_yt_dlp() {
+        let yt_dlp = match self.check_bundled_tools() {
             Ok(path) => path,
             Err(err) => {
-                self.status = "エラー".to_owned();
+                self.status = "同梱ファイルエラー".to_owned();
                 self.log = err;
                 return;
             }
@@ -127,28 +175,47 @@ impl App {
             .to_string_lossy()
             .to_string();
         let mode = self.mode;
+        let quality = self.quality;
+        let app_dir = Self::app_dir();
         let shared_child = Arc::clone(&self.child);
 
         thread::spawn(move || {
             let mut command = Command::new(yt_dlp);
             command
                 .arg("--newline")
+                .arg("--encoding")
+                .arg("utf-8")
                 .arg("--no-playlist")
                 .arg("--windows-filenames")
+                .arg("--ffmpeg-location")
+                .arg(&app_dir)
                 .arg("-o")
                 .arg(output_template);
 
             match mode {
-                DownloadMode::Video => {
-                    command.args(["-f", "best[ext=mp4]/best"]);
+                DownloadMode::VideoMp4 => {
+                    command
+                        .arg("-f")
+                        .arg(quality.format())
+                        .args(["--merge-output-format", "mp4"]);
                 }
-                DownloadMode::Audio => {
-                    command.args(["-f", "bestaudio[ext=m4a]/bestaudio"]);
+                DownloadMode::AudioMp3 => {
+                    command.args([
+                        "-f",
+                        "bestaudio/best",
+                        "-x",
+                        "--audio-format",
+                        "mp3",
+                        "--audio-quality",
+                        "0",
+                    ]);
                 }
             }
 
             command
                 .arg(url)
+                .env("PYTHONUTF8", "1")
+                .env("PYTHONIOENCODING", "utf-8")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .stdin(Stdio::null())
@@ -157,7 +224,9 @@ impl App {
             let mut child = match command.spawn() {
                 Ok(child) => child,
                 Err(e) => {
-                    let _ = tx.send(AppMessage::Finished(Err(format!("yt-dlpを起動できません: {e}"))));
+                    let _ = tx.send(AppMessage::Finished(Err(format!(
+                        "yt-dlpを起動できません: {e}"
+                    ))));
                     return;
                 }
             };
@@ -191,7 +260,9 @@ impl App {
                     let mut guard = match shared_child.lock() {
                         Ok(g) => g,
                         Err(_) => {
-                            let _ = tx.send(AppMessage::Finished(Err("内部エラーが発生しました".to_owned())));
+                            let _ = tx.send(AppMessage::Finished(Err(
+                                "内部エラーが発生しました".to_owned(),
+                            )));
                             return;
                         }
                     };
@@ -205,7 +276,9 @@ impl App {
                     Ok(Some(status)) => break status,
                     Ok(None) => thread::sleep(std::time::Duration::from_millis(100)),
                     Err(e) => {
-                        let _ = tx.send(AppMessage::Finished(Err(format!("実行状態を確認できません: {e}"))));
+                        let _ = tx.send(AppMessage::Finished(Err(format!(
+                            "実行状態を確認できません: {e}"
+                        ))));
                         return;
                     }
                 }
@@ -285,6 +358,34 @@ impl WindowsCommandExt for Command {
     }
 }
 
+fn install_japanese_font(ctx: &egui::Context) {
+    let candidates = [
+        r"C:\Windows\Fonts\YuGothM.ttc",
+        r"C:\Windows\Fonts\YuGothR.ttc",
+        r"C:\Windows\Fonts\meiryo.ttc",
+        r"C:\Windows\Fonts\msgothic.ttc",
+    ];
+
+    for path in candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "japanese_system_font".to_owned(),
+                egui::FontData::from_owned(bytes).into(),
+            );
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                fonts
+                    .families
+                    .entry(family)
+                    .or_default()
+                    .insert(0, "japanese_system_font".to_owned());
+            }
+            ctx.set_fonts(fonts);
+            return;
+        }
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_messages();
@@ -294,7 +395,7 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Rust yt-dlp GUI");
-            ui.label("動画URLを貼り付けて、保存形式と保存先を選んでください。");
+            ui.label("動画URLを貼り付けて、形式・画質・保存先を選択してください。");
             ui.add_space(10.0);
 
             ui.label("URL");
@@ -309,9 +410,29 @@ impl eframe::App for App {
             ui.label("保存形式");
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!self.running, |ui| {
-                    ui.radio_value(&mut self.mode, DownloadMode::Video, "動画 (MP4)");
-                    ui.radio_value(&mut self.mode, DownloadMode::Audio, "音声 (M4A)");
+                    ui.radio_value(&mut self.mode, DownloadMode::VideoMp4, "動画 (MP4)");
+                    ui.radio_value(&mut self.mode, DownloadMode::AudioMp3, "音声 (MP3)");
                 });
+            });
+
+            ui.add_space(8.0);
+            ui.add_enabled_ui(!self.running && self.mode == DownloadMode::VideoMp4, |ui| {
+                ui.label("画質");
+                egui::ComboBox::from_id_salt("quality")
+                    .selected_text(self.quality.label())
+                    .show_ui(ui, |ui| {
+                        for quality in [
+                            VideoQuality::Best,
+                            VideoQuality::Q2160,
+                            VideoQuality::Q1440,
+                            VideoQuality::Q1080,
+                            VideoQuality::Q720,
+                            VideoQuality::Q480,
+                            VideoQuality::Q360,
+                        ] {
+                            ui.selectable_value(&mut self.quality, quality, quality.label());
+                        }
+                    });
             });
 
             ui.add_space(8.0);
@@ -321,7 +442,10 @@ impl eframe::App for App {
                     !self.running,
                     egui::TextEdit::singleline(&mut self.output_dir).desired_width(430.0),
                 );
-                if ui.add_enabled(!self.running, egui::Button::new("参照")).clicked() {
+                if ui
+                    .add_enabled(!self.running, egui::Button::new("参照"))
+                    .clicked()
+                {
                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
                         self.output_dir = path.to_string_lossy().to_string();
                     }
@@ -349,7 +473,7 @@ impl eframe::App for App {
             ui.label("ログ");
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
-                .max_height(250.0)
+                .max_height(260.0)
                 .show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::multiline(&mut self.log)
@@ -361,7 +485,7 @@ impl eframe::App for App {
                 });
 
             ui.add_space(6.0);
-            ui.small("初回実行時のみ、公式GitHub Releaseからyt-dlp.exeを自動取得します。");
+            ui.small("yt-dlpとffmpegはZIP内に同梱されています。フォルダ内のファイルをまとめて使用してください。");
         });
     }
 }
@@ -370,8 +494,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Rust yt-dlp GUI")
-            .with_inner_size([640.0, 520.0])
-            .with_min_inner_size([560.0, 430.0]),
+            .with_inner_size([680.0, 570.0])
+            .with_min_inner_size([590.0, 480.0]),
         ..Default::default()
     };
 
@@ -380,6 +504,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            install_japanese_font(&cc.egui_ctx);
             Ok(Box::new(App::default()))
         }),
     )
