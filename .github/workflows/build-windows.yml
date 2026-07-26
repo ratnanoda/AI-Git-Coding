@@ -9,6 +9,14 @@ on:
       - "Cargo.lock"
       - "src/**"
       - ".github/workflows/build-windows.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**"
+      - ".github/workflows/build-windows.yml"
+      - "BUILD_TRIGGER"
 
 permissions:
   contents: read
