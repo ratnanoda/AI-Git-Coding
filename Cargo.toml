@@ -1,0 +1,16 @@
+[package]
+name = "rust-ytdlp-gui"
+version = "1.0.0"
+edition = "2021"
+description = "A simple Windows GUI for yt-dlp written in Rust"
+license = "MIT"
+
+[dependencies]
+eframe = "0.31"
+rfd = "0.15"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
