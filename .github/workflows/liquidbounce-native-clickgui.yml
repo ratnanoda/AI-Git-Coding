@@ -1,0 +1,677 @@
+name: Build Native LiquidBounce ClickGUI
+
+on:
+  push:
+    branches:
+      - tmp/liquidbounce-native-clickgui-20260810
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout LiquidBounce nextgen
+        uses: actions/checkout@v6
+        with:
+          repository: CCBlueX/LiquidBounce
+          ref: nextgen
+          submodules: recursive
+
+      - name: Install native ClickGUI
+        shell: bash
+        run: |
+          cat > src/main/kotlin/net/ccbluex/liquidbounce/features/module/modules/render/ModuleClickGui.kt <<'KOTLIN'
+          /*
+           * This file is part of LiquidBounce (https://github.com/CCBlueX/LiquidBounce)
+           *
+           * Copyright (c) 2015 - 2026 CCBlueX
+           *
+           * LiquidBounce is free software: you can redistribute it and/or modify
+           * it under the terms of the GNU General Public License as published by
+           * the Free Software Foundation, either version 3 of the License, or
+           * (at your option) any later version.
+           */
+          package net.ccbluex.liquidbounce.features.module.modules.render
+
+          import net.ccbluex.liquidbounce.LiquidBounce
+          import net.ccbluex.liquidbounce.config.types.group.ToggleableValueGroup
+          import net.ccbluex.liquidbounce.event.EventManager
+          import net.ccbluex.liquidbounce.event.events.ClickGuiScaleChangeEvent
+          import net.ccbluex.liquidbounce.event.events.ClickGuiValueChangeEvent
+          import net.ccbluex.liquidbounce.features.module.ClientModule
+          import net.ccbluex.liquidbounce.features.module.ModuleCategories
+          import net.ccbluex.liquidbounce.features.module.modules.render.clickgui.NativeClickGuiScreen
+          import net.ccbluex.liquidbounce.utils.client.inGame
+          import net.ccbluex.liquidbounce.utils.client.mc
+          import org.lwjgl.glfw.GLFW
+
+          object ModuleClickGui :
+              ClientModule("ClickGUI", ModuleCategories.RENDER, bind = GLFW.GLFW_KEY_RIGHT_SHIFT, disableActivation = true) {
+
+              override val running get() = true
+
+              val guiScale by float("Scale", 1f, 0.5f..2f).onChanged {
+                  EventManager.callEvent(ClickGuiScaleChangeEvent(it))
+                  EventManager.callEvent(ClickGuiValueChangeEvent(this))
+              }
+
+              @Suppress("UnusedPrivateProperty", "unused")
+              private val searchBarAutoFocus by boolean("SearchBarAutoFocus", true).onChanged {
+                  EventManager.callEvent(ClickGuiValueChangeEvent(this))
+              }
+
+              val isInSearchBar: Boolean
+                  get() = false
+
+              object Snapping : ToggleableValueGroup(this, "Snapping", true) {
+                  val gridSize by int("GridSize", 10, 1..100, "px").onChanged {
+                      EventManager.callEvent(ClickGuiValueChangeEvent(ModuleClickGui))
+                  }
+
+                  init {
+                      inner.find { it.name == "Enabled" }?.onChanged {
+                          EventManager.callEvent(ClickGuiValueChangeEvent(ModuleClickGui))
+                      }
+                  }
+              }
+
+              init {
+                  tree(Snapping)
+              }
+
+              override fun onEnabled() {
+                  if (!LiquidBounce.isInitialized || !inGame) {
+                      return
+                  }
+
+                  mc.execute {
+                      mc.gui.setScreen(NativeClickGuiScreen())
+                  }
+                  super.onEnabled()
+              }
+
+              fun sync() = Unit
+              fun invalidate() = Unit
+          }
+          KOTLIN
+
+          mkdir -p src/main/kotlin/net/ccbluex/liquidbounce/features/module/modules/render/clickgui
+          cat > src/main/kotlin/net/ccbluex/liquidbounce/features/module/modules/render/clickgui/NativeClickGuiScreen.kt <<'KOTLIN'
+          /*
+           * Native ClickGUI for LiquidBounce.
+           * Uses Minecraft GUI rendering directly; no CEF/JCEF/browser is used by this screen.
+           */
+          package net.ccbluex.liquidbounce.features.module.modules.render.clickgui
+
+          import net.ccbluex.liquidbounce.config.ConfigSystem
+          import net.ccbluex.liquidbounce.config.types.RangedValue
+          import net.ccbluex.liquidbounce.config.types.Value
+          import net.ccbluex.liquidbounce.config.types.group.ModeValueGroup
+          import net.ccbluex.liquidbounce.config.types.group.ToggleableValueGroup
+          import net.ccbluex.liquidbounce.config.types.group.ValueGroup
+          import net.ccbluex.liquidbounce.config.types.list.ChoiceListValue
+          import net.ccbluex.liquidbounce.features.module.ClientModule
+          import net.ccbluex.liquidbounce.features.module.ModuleCategories
+          import net.ccbluex.liquidbounce.features.module.ModuleCategory
+          import net.ccbluex.liquidbounce.features.module.ModuleManager
+          import net.ccbluex.liquidbounce.features.module.ModuleManager.modulesConfig
+          import net.ccbluex.liquidbounce.features.module.modules.render.ModuleClickGui
+          import net.ccbluex.liquidbounce.utils.text.asPlainText
+          import net.minecraft.client.gui.GuiGraphicsExtractor
+          import net.minecraft.client.gui.screens.Screen
+          import net.minecraft.client.input.MouseButtonEvent
+          import net.minecraft.util.ARGB
+          import kotlin.math.max
+          import kotlin.math.min
+          import kotlin.math.roundToInt
+
+          private const val PANEL_WIDTH = 250f
+          private const val HEADER_HEIGHT = 36f
+          private const val MODULE_HEIGHT = 32f
+          private const val SETTING_HEIGHT = 28f
+          private const val MAX_BODY_HEIGHT = 545f
+
+          private val ACCENT = ARGB.color(255, 70, 119, 255)
+          private val HEADER_BG = ARGB.color(230, 0, 0, 0)
+          private val BODY_BG = ARGB.color(204, 0, 0, 0)
+          private val BODY_HOVER = ARGB.color(217, 0, 0, 0)
+          private val SETTINGS_BG = ARGB.color(150, 0, 0, 0)
+          private val SHADOW = ARGB.color(80, 0, 0, 0)
+          private val WHITE = ARGB.color(255, 255, 255, 255)
+          private val DIM = ARGB.color(255, 211, 211, 211)
+          private val SLIDER_TRACK = ARGB.color(255, 42, 42, 42)
+
+          private data class PanelState(
+              val category: ModuleCategory,
+              var x: Float,
+              var y: Float,
+              var expanded: Boolean = false,
+              var scroll: Float = 0f,
+              var zIndex: Int = 0,
+          )
+
+          private object NativeClickGuiState {
+              val panels = ModuleCategories.entries.mapIndexed { index, category ->
+                  PanelState(category, x = 20f, y = 20f + index * 50f, zIndex = index)
+              }.toMutableList()
+              val expandedModules = mutableSetOf<String>()
+              var maxZ = panels.size
+          }
+
+          private sealed interface RowEntry {
+              val height: Float
+
+              data class ModuleRow(val module: ClientModule) : RowEntry {
+                  override val height = MODULE_HEIGHT
+              }
+
+              data class SettingRow(val value: Value<*>, val depth: Int) : RowEntry {
+                  override val height = SETTING_HEIGHT
+              }
+          }
+
+          class NativeClickGuiScreen : Screen("LiquidBounce ClickGUI".asPlainText()) {
+
+              private val modulesByCategory: Map<ModuleCategory, List<ClientModule>> =
+                  ModuleCategories.entries.associateWith { category ->
+                      ModuleManager.filter { it.category == category }.sortedBy { it.name.lowercase() }
+                  }
+
+              private var draggingPanel: PanelState? = null
+              private var dragOffsetX = 0f
+              private var dragOffsetY = 0f
+              private var draggedRange: RangedValue<*>? = null
+              private var draggedRangeX = 0f
+              private var draggedRangeWidth = 0f
+
+              override fun extractRenderState(context: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, partialTick: Float) {
+                  val scale = ModuleClickGui.guiScale.coerceIn(0.5f, 2f)
+                  val logicalMouseX = mouseX / scale
+                  val logicalMouseY = mouseY / scale
+
+                  val pose = context.pose()
+                  pose.pushMatrix()
+                  pose.scale(scale, scale)
+
+                  for (panel in NativeClickGuiState.panels.sortedBy { it.zIndex }) {
+                      drawPanel(context, panel, logicalMouseX, logicalMouseY)
+                  }
+
+                  pose.popMatrix()
+              }
+
+              private fun drawPanel(context: GuiGraphicsExtractor, panel: PanelState, mouseX: Float, mouseY: Float) {
+                  val rows = rowsFor(panel)
+                  val contentHeight = rows.sumOf { it.height.toDouble() }.toFloat()
+                  val bodyHeight = if (panel.expanded) min(MAX_BODY_HEIGHT, contentHeight) else 0f
+                  val totalHeight = HEADER_HEIGHT + bodyHeight
+
+                  context.fill(
+                      (panel.x - 2).toInt(), (panel.y - 2).toInt(),
+                      (panel.x + PANEL_WIDTH + 2).toInt(), (panel.y + totalHeight + 2).toInt(), SHADOW
+                  )
+                  context.fill(
+                      panel.x.toInt(), panel.y.toInt(),
+                      (panel.x + PANEL_WIDTH).toInt(), (panel.y + HEADER_HEIGHT).toInt(), HEADER_BG
+                  )
+                  context.fill(
+                      panel.x.toInt(), (panel.y + HEADER_HEIGHT - 2).toInt(),
+                      (panel.x + PANEL_WIDTH).toInt(), (panel.y + HEADER_HEIGHT).toInt(), ACCENT
+                  )
+
+                  context.text(
+                      font,
+                      panel.category.tag.asPlainText(),
+                      (panel.x + 15).toInt(),
+                      (panel.y + 13).toInt(),
+                      WHITE,
+                      true
+                  )
+
+                  val iconCx = panel.x + PANEL_WIDTH - 18
+                  val iconCy = panel.y + HEADER_HEIGHT / 2
+                  context.fill(
+                      (iconCx - 6).toInt(), (iconCy - 1).toInt(),
+                      (iconCx + 6).toInt(), (iconCy + 1).toInt(), WHITE
+                  )
+                  if (!panel.expanded) {
+                      context.fill(
+                          (iconCx - 1).toInt(), (iconCy - 6).toInt(),
+                          (iconCx + 1).toInt(), (iconCy + 6).toInt(), WHITE
+                      )
+                  }
+
+                  if (!panel.expanded || bodyHeight <= 0f) {
+                      return
+                  }
+
+                  val maxScroll = max(0f, contentHeight - bodyHeight)
+                  panel.scroll = panel.scroll.coerceIn(0f, maxScroll)
+
+                  val bodyTop = panel.y + HEADER_HEIGHT
+                  val bodyBottom = bodyTop + bodyHeight
+                  context.fill(
+                      panel.x.toInt(), bodyTop.toInt(),
+                      (panel.x + PANEL_WIDTH).toInt(), bodyBottom.toInt(), BODY_BG
+                  )
+
+                  var rowY = bodyTop - panel.scroll
+                  for (row in rows) {
+                      val rowBottom = rowY + row.height
+                      if (rowBottom >= bodyTop && rowY <= bodyBottom) {
+                          when (row) {
+                              is RowEntry.ModuleRow -> drawModuleRow(context, panel, row.module, rowY, mouseX, mouseY)
+                              is RowEntry.SettingRow -> drawSettingRow(context, panel, row.value, row.depth, rowY, mouseX, mouseY)
+                          }
+                      }
+                      rowY = rowBottom
+                  }
+              }
+
+              private fun drawModuleRow(
+                  context: GuiGraphicsExtractor,
+                  panel: PanelState,
+                  module: ClientModule,
+                  y: Float,
+                  mouseX: Float,
+                  mouseY: Float,
+              ) {
+                  val hovered = inside(mouseX, mouseY, panel.x, y, PANEL_WIDTH, MODULE_HEIGHT)
+                  if (hovered) {
+                      context.fill(
+                          panel.x.toInt(), y.toInt(),
+                          (panel.x + PANEL_WIDTH).toInt(), (y + MODULE_HEIGHT).toInt(), BODY_HOVER
+                      )
+                  }
+
+                  val textColor = if (module.enabled) ACCENT else DIM
+                  context.text(font, module.name.asPlainText(), (panel.x + 15).toInt(), (y + 11).toInt(), textColor, false)
+
+                  if (moduleSettings(module).isNotEmpty()) {
+                      val marker = if (module.name in NativeClickGuiState.expandedModules) "v" else ">"
+                      context.text(
+                          font,
+                          marker.asPlainText(),
+                          (panel.x + PANEL_WIDTH - 20).toInt(),
+                          (y + 11).toInt(),
+                          DIM,
+                          false
+                      )
+                  }
+              }
+
+              private fun drawSettingRow(
+                  context: GuiGraphicsExtractor,
+                  panel: PanelState,
+                  value: Value<*>,
+                  depth: Int,
+                  y: Float,
+                  mouseX: Float,
+                  mouseY: Float,
+              ) {
+                  val hovered = inside(mouseX, mouseY, panel.x, y, PANEL_WIDTH, SETTING_HEIGHT)
+                  context.fill(
+                      panel.x.toInt(), y.toInt(),
+                      (panel.x + PANEL_WIDTH).toInt(), (y + SETTING_HEIGHT).toInt(),
+                      if (hovered) BODY_HOVER else SETTINGS_BG
+                  )
+                  context.fill(panel.x.toInt(), y.toInt(), (panel.x + 4).toInt(), (y + SETTING_HEIGHT).toInt(), ACCENT)
+
+                  val nameX = panel.x + 12 + depth * 9
+                  context.text(font, value.name.asPlainText(), nameX.toInt(), (y + 9).toInt(), DIM, false)
+
+                  when (value) {
+                      is ToggleableValueGroup -> drawBoolean(context, panel, y, value.enabled)
+                      is ModeValueGroup<*> -> drawRightValue(context, panel, y, value.activeMode.name)
+                      is ChoiceListValue<*> -> drawRightValue(context, panel, y, value.getValue().toString())
+                      is RangedValue<*> -> {
+                          val current = value.get()
+                          if (current is Number && value.range.start is Number && value.range.endInclusive is Number) {
+                              drawSlider(context, panel, y, value, current)
+                          } else {
+                              drawRightValue(context, panel, y, displayValue(value))
+                          }
+                      }
+                      else -> {
+                          val current = value.get()
+                          if (current is Boolean) {
+                              drawBoolean(context, panel, y, current)
+                          } else {
+                              drawRightValue(context, panel, y, displayValue(value))
+                          }
+                      }
+                  }
+              }
+
+              private fun drawBoolean(context: GuiGraphicsExtractor, panel: PanelState, y: Float, enabled: Boolean) {
+                  val x = panel.x + PANEL_WIDTH - 44
+                  val cy = y + SETTING_HEIGHT / 2
+                  val trackColor = if (enabled) ARGB.color(255, 22, 46, 105) else ARGB.color(255, 55, 55, 55)
+                  context.fill(x.toInt(), (cy - 5).toInt(), (x + 28).toInt(), (cy + 5).toInt(), trackColor)
+                  val thumbX = if (enabled) x + 19 else x + 3
+                  context.fill(thumbX.toInt(), (cy - 7).toInt(), (thumbX + 7).toInt(), (cy + 7).toInt(), if (enabled) ACCENT else WHITE)
+              }
+
+              private fun drawRightValue(context: GuiGraphicsExtractor, panel: PanelState, y: Float, text: String) {
+                  val clipped = if (text.length > 18) text.take(17) + "…" else text
+                  val width = font.width(clipped)
+                  context.text(
+                      font,
+                      clipped.asPlainText(),
+                      (panel.x + PANEL_WIDTH - 15 - width).toInt(),
+                      (y + 9).toInt(),
+                      DIM,
+                      false
+                  )
+              }
+
+              private fun drawSlider(
+                  context: GuiGraphicsExtractor,
+                  panel: PanelState,
+                  y: Float,
+                  value: RangedValue<*>,
+                  current: Number,
+              ) {
+                  val start = (value.range.start as Number).toDouble()
+                  val end = (value.range.endInclusive as Number).toDouble()
+                  val ratio = if (end == start) 0.0 else ((current.toDouble() - start) / (end - start)).coerceIn(0.0, 1.0)
+                  val sliderX = panel.x + PANEL_WIDTH - 105
+                  val sliderW = 90f
+                  val sliderY = y + SETTING_HEIGHT - 6
+                  context.fill(sliderX.toInt(), sliderY.toInt(), (sliderX + sliderW).toInt(), (sliderY + 2).toInt(), SLIDER_TRACK)
+                  context.fill(sliderX.toInt(), sliderY.toInt(), (sliderX + sliderW * ratio).toInt(), (sliderY + 2).toInt(), ACCENT)
+                  drawRightValue(context, panel, y - 3, displayValue(value))
+              }
+
+              private fun rowsFor(panel: PanelState): List<RowEntry> {
+                  if (!panel.expanded) return emptyList()
+                  val rows = ArrayList<RowEntry>()
+                  for (module in modulesByCategory[panel.category].orEmpty()) {
+                      rows += RowEntry.ModuleRow(module)
+                      if (module.name in NativeClickGuiState.expandedModules) {
+                          moduleSettings(module).forEach { (value, depth) ->
+                              rows += RowEntry.SettingRow(value, depth)
+                          }
+                      }
+                  }
+                  return rows
+              }
+
+              private fun moduleSettings(module: ClientModule): List<Pair<Value<*>, Int>> {
+                  val output = ArrayList<Pair<Value<*>, Int>>()
+
+                  fun visit(value: Value<*>, depth: Int) {
+                      if (value.name.equals("Bind", true) || value.name.equals("Hidden", true) || value.notAnOption) {
+                          return
+                      }
+
+                      when (value) {
+                          is ToggleableValueGroup -> {
+                              output += value to depth
+                              if (value.enabled) {
+                                  value.containedValues.forEach { child ->
+                                      if (child !== value.enabledValue) visit(child, depth + 1)
+                                  }
+                              }
+                          }
+                          is ModeValueGroup<*> -> {
+                              output += value to depth
+                              value.activeMode.containedValues.forEach { child -> visit(child, depth + 1) }
+                          }
+                          is ValueGroup -> value.containedValues.forEach { child -> visit(child, depth) }
+                          else -> output += value to depth
+                      }
+                  }
+
+                  module.containedValues.forEach { visit(it, 0) }
+                  return output
+              }
+
+              override fun mouseClicked(click: MouseButtonEvent, doubled: Boolean): Boolean {
+                  val scale = ModuleClickGui.guiScale.coerceIn(0.5f, 2f)
+                  val mouseX = (click.x / scale).toFloat()
+                  val mouseY = (click.y / scale).toFloat()
+                  val button = click.button()
+
+                  for (panel in NativeClickGuiState.panels.sortedByDescending { it.zIndex }) {
+                      if (inside(mouseX, mouseY, panel.x, panel.y, PANEL_WIDTH, HEADER_HEIGHT)) {
+                          panel.zIndex = ++NativeClickGuiState.maxZ
+                          if (button == 0) {
+                              draggingPanel = panel
+                              dragOffsetX = mouseX - panel.x
+                              dragOffsetY = mouseY - panel.y
+                          } else if (button == 1) {
+                              panel.expanded = !panel.expanded
+                          }
+                          return true
+                      }
+
+                      if (!panel.expanded) continue
+                      val rows = rowsFor(panel)
+                      val contentHeight = rows.sumOf { it.height.toDouble() }.toFloat()
+                      val bodyHeight = min(MAX_BODY_HEIGHT, contentHeight)
+                      val bodyTop = panel.y + HEADER_HEIGHT
+                      if (!inside(mouseX, mouseY, panel.x, bodyTop, PANEL_WIDTH, bodyHeight)) continue
+
+                      var rowY = bodyTop - panel.scroll
+                      for (row in rows) {
+                          if (inside(mouseX, mouseY, panel.x, rowY, PANEL_WIDTH, row.height)) {
+                              panel.zIndex = ++NativeClickGuiState.maxZ
+                              when (row) {
+                                  is RowEntry.ModuleRow -> {
+                                      if (button == 0) {
+                                          row.module.enabled = !row.module.enabled
+                                          storeConfig()
+                                      } else if (button == 1 && moduleSettings(row.module).isNotEmpty()) {
+                                          if (!NativeClickGuiState.expandedModules.add(row.module.name)) {
+                                              NativeClickGuiState.expandedModules.remove(row.module.name)
+                                          }
+                                      }
+                                  }
+                                  is RowEntry.SettingRow -> handleSettingClick(row.value, panel, rowY, mouseX, button)
+                              }
+                              return true
+                          }
+                          rowY += row.height
+                      }
+                  }
+
+                  return super.mouseClicked(click, doubled)
+              }
+
+              private fun handleSettingClick(value: Value<*>, panel: PanelState, rowY: Float, mouseX: Float, button: Int) {
+                  when (value) {
+                      is ToggleableValueGroup -> {
+                          value.enabled = !value.enabled
+                          storeConfig()
+                      }
+                      is ModeValueGroup<*> -> {
+                          cycleMode(value, if (button == 1) -1 else 1)
+                          storeConfig()
+                      }
+                      is ChoiceListValue<*> -> {
+                          cycleChoice(value, if (button == 1) -1 else 1)
+                          storeConfig()
+                      }
+                      is RangedValue<*> -> {
+                          val current = value.get()
+                          if (current is Number && value.range.start is Number && value.range.endInclusive is Number) {
+                              val sliderX = panel.x + PANEL_WIDTH - 105
+                              val sliderW = 90f
+                              setRanged(value, mouseX, sliderX, sliderW)
+                              draggedRange = value
+                              draggedRangeX = sliderX
+                              draggedRangeWidth = sliderW
+                          }
+                      }
+                      else -> {
+                          val current = value.get()
+                          if (current is Boolean) {
+                              @Suppress("UNCHECKED_CAST")
+                              (value as Value<Boolean>).set(!current)
+                              storeConfig()
+                          }
+                      }
+                  }
+              }
+
+              override fun mouseDragged(click: MouseButtonEvent, offsetX: Double, offsetY: Double): Boolean {
+                  val scale = ModuleClickGui.guiScale.coerceIn(0.5f, 2f)
+                  val mouseX = (click.x / scale).toFloat()
+                  val mouseY = (click.y / scale).toFloat()
+
+                  draggingPanel?.let { panel ->
+                      var x = mouseX - dragOffsetX
+                      var y = mouseY - dragOffsetY
+                      if (ModuleClickGui.Snapping.enabled) {
+                          val grid = ModuleClickGui.Snapping.gridSize.coerceAtLeast(1).toFloat()
+                          x = (x / grid).roundToInt() * grid
+                          y = (y / grid).roundToInt() * grid
+                      }
+                      panel.x = x.coerceAtLeast(0f)
+                      panel.y = y.coerceAtLeast(0f)
+                      return true
+                  }
+
+                  draggedRange?.let { value ->
+                      setRanged(value, mouseX, draggedRangeX, draggedRangeWidth)
+                      return true
+                  }
+
+                  return super.mouseDragged(click, offsetX, offsetY)
+              }
+
+              override fun mouseReleased(click: MouseButtonEvent): Boolean {
+                  val hadRange = draggedRange != null
+                  draggingPanel = null
+                  draggedRange = null
+                  if (hadRange) storeConfig()
+                  return true
+              }
+
+              override fun mouseScrolled(
+                  mouseX: Double,
+                  mouseY: Double,
+                  horizontalAmount: Double,
+                  verticalAmount: Double,
+              ): Boolean {
+                  val scale = ModuleClickGui.guiScale.coerceIn(0.5f, 2f)
+                  val mx = (mouseX / scale).toFloat()
+                  val my = (mouseY / scale).toFloat()
+
+                  for (panel in NativeClickGuiState.panels.sortedByDescending { it.zIndex }) {
+                      if (!panel.expanded) continue
+                      val rows = rowsFor(panel)
+                      val contentHeight = rows.sumOf { it.height.toDouble() }.toFloat()
+                      val bodyHeight = min(MAX_BODY_HEIGHT, contentHeight)
+                      val bodyTop = panel.y + HEADER_HEIGHT
+                      if (inside(mx, my, panel.x, bodyTop, PANEL_WIDTH, bodyHeight)) {
+                          val maxScroll = max(0f, contentHeight - bodyHeight)
+                          panel.scroll = (panel.scroll - verticalAmount.toFloat() * 30f).coerceIn(0f, maxScroll)
+                          return true
+                      }
+                  }
+                  return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount)
+              }
+
+              private fun setRanged(value: RangedValue<*>, mouseX: Float, sliderX: Float, sliderWidth: Float) {
+                  val current = value.get()
+                  val start = value.range.start as? Number ?: return
+                  val end = value.range.endInclusive as? Number ?: return
+                  val ratio = ((mouseX - sliderX) / sliderWidth).coerceIn(0f, 1f)
+                  val number = start.toDouble() + (end.toDouble() - start.toDouble()) * ratio
+                  val serialized = when (current) {
+                      is Int -> number.roundToInt().toString()
+                      is Long -> number.toLong().toString()
+                      is Float -> number.toFloat().toString()
+                      is Double -> number.toString()
+                      else -> return
+                  }
+                  runCatching { value.setByString(serialized) }
+              }
+
+              private fun cycleChoice(value: ChoiceListValue<*>, direction: Int) {
+                  val choices = value.getChoicesStrings()
+                  if (choices.isEmpty()) return
+                  val current = value.getValue().toString()
+                  val currentIndex = choices.indexOfFirst { it.equals(current, true) }.coerceAtLeast(0)
+                  val next = Math.floorMod(currentIndex + direction, choices.size)
+                  runCatching { value.setByString(choices[next]) }
+              }
+
+              private fun cycleMode(value: ModeValueGroup<*>, direction: Int) {
+                  val modes = value.getModeStrings()
+                  if (modes.isEmpty()) return
+                  val currentIndex = modes.indexOfFirst { it.equals(value.activeMode.name, true) }.coerceAtLeast(0)
+                  val next = Math.floorMod(currentIndex + direction, modes.size)
+                  runCatching { value.setByString(modes[next]) }
+              }
+
+              private fun displayValue(value: Value<*>): String {
+                  return when (val v = value.getValue()) {
+                      is Float -> "%.2f".format(v)
+                      is Double -> "%.2f".format(v)
+                      else -> v.toString()
+                  }
+              }
+
+              private fun storeConfig() {
+                  runCatching { ConfigSystem.store(modulesConfig) }
+              }
+
+              private fun inside(mx: Float, my: Float, x: Float, y: Float, w: Float, h: Float): Boolean {
+                  return mx >= x && mx < x + w && my >= y && my < y + h
+              }
+
+              @Suppress("detekt:EmptyFunctionBlock")
+              override fun extractBackground(context: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, delta: Float) {
+              }
+
+              override fun shouldCloseOnEsc() = true
+              override fun isPauseScreen() = false
+          }
+          KOTLIN
+
+      - name: Detect JDK version
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          JDK_VERSION=$(grep '^jdk[[:space:]]*=' gradle/libs.versions.toml | head -n1 | sed -n 's/^[^=]*=[[:space:]]*"\([^"]*\)".*/\1/p')
+          test -n "$JDK_VERSION"
+          echo "jdk=$JDK_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Setup JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ steps.versions.outputs.jdk }}
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Prepare theme permissions
+        run: sudo chmod -R 777 src-theme
+
+      - name: Build LiquidBounce
+        env:
+          CI: true
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./gradlew build -x test -x detekt
+
+      - name: Collect JAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          JAR=$(find build/libs -maxdepth 1 -type f -regex '.*/liquidbounce-[0-9.]*\.jar' | head -n1)
+          test -n "$JAR"
+          cp "$JAR" artifact/liquidbounce-native-clickgui.jar
+          sha256sum artifact/liquidbounce-native-clickgui.jar | tee artifact/SHA256SUMS.txt
+
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: liquidbounce-native-clickgui
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 1
